@@ -21,7 +21,7 @@ from database import (
     end_reading_session, get_bot_state, set_bot_state, get_all_users,
     get_reading_stats
 )
-from states import BroadcastStates
+from states import BroadcastStates, FeedbackStates
 from middlewares import BotActiveMiddleware, CallbackActiveMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -68,7 +68,7 @@ async def feedback_menu(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="❓ Вопросы", url=config.QUESTIONS_URL)],
-            [InlineKeyboardButton(text="⭐️ Отзывы", url=config.REVIEWS_URL)],
+            [InlineKeyboardButton(text="⭐️ Отзывы", callback_data="submit_feedback")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_start")]
         ]
     )
@@ -77,8 +77,57 @@ async def feedback_menu(callback: CallbackQuery):
     await callback.answer()
 
 
+@dp.callback_query(F.data == "submit_feedback")
+async def start_feedback(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer(
+        "✍️ Напишите ваш отзыв. Он будет отправлен анонимно.\n\n"
+        "Чтобы отменить, отправьте /cancel"
+    )
+    await state.set_state(FeedbackStates.waiting_for_text)
+    await callback.answer()
+
+
+@dp.message(StateFilter(FeedbackStates.waiting_for_text))
+async def process_feedback(message: Message, state: FSMContext):
+    feedback_text = message.text
+
+    if feedback_text == "/cancel":
+        await state.clear()
+        await message.answer("❌ Отправка отзыва отменена.")
+        return
+
+    success = 0
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"📝 <b>Анонимный отзыв</b>\n\n{feedback_text}",
+                parse_mode=ParseMode.HTML
+            )
+            success += 1
+        except Exception as e:
+            logging.error(f"Не удалось отправить отзыв админу {admin_id}: {e}")
+
+    if success > 0:
+        await message.answer("✅ Спасибо! Ваш отзыв анонимно отправлен автору.")
+    else:
+        await message.answer("❌ Не удалось отправить отзыв. Попробуйте позже.")
+
+    await state.clear()
+
+
+@dp.message(Command("cancel"))
+async def cancel_handler(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    await state.clear()
+    await message.answer("Действие отменено.")
+
+
 @dp.callback_query(F.data == "back_to_start")
-async def back_to_start(callback: CallbackQuery):
+async def back_to_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📖 Читать книгу", callback_data="open_book")],
@@ -117,7 +166,6 @@ async def webapp_data(message: Message):
         elif action == "chapter_changed" and chapter:
             await message.answer(f"📖 Вы читаете главу {chapter} книги KROSS")
 
-        # НОВАЯ ФУНКЦИЯ
         elif action == "close_app":
             if chapter and page:
                 await message.answer(
@@ -134,6 +182,7 @@ async def webapp_data(message: Message):
         await message.answer("✅ Данные из приложения получены")
 
 
+# ================= АДМИН-ПАНЕЛЬ (без изменений) =================
 @dp.message(Command("admkross743"))
 async def admin_panel(message: Message):
     if message.from_user.id not in config.ADMIN_IDS:
@@ -154,7 +203,6 @@ async def admin_panel(message: Message):
 
 @dp.callback_query(F.data.startswith("admin_"))
 async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
-
     if callback.from_user.id not in config.ADMIN_IDS:
         await callback.answer("Доступ запрещён", show_alert=True)
         return
@@ -175,9 +223,7 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
 
     elif action == "admin_stats":
-
         stats = get_reading_stats()
-
         text = f"""📊 Статистика использования:
 
 👥 Активных пользователей:
@@ -191,7 +237,6 @@ async def admin_callbacks(callback: CallbackQuery, state: FSMContext):
 • 30 минут: {stats['duration']['>30 мин']}
 • 60 минут: {stats['duration']['>60 мин']}
 """
-
         await callback.message.edit_text(text, reply_markup=back_to_admin_keyboard())
         await callback.answer()
 
@@ -217,9 +262,7 @@ def back_to_admin_keyboard():
 
 @dp.callback_query(F.data == "admin_back")
 async def admin_back(callback: CallbackQuery, state: FSMContext):
-
     await state.clear()
-
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🟢 Включить бота", callback_data="admin_bot_on"),
@@ -229,82 +272,56 @@ async def admin_back(callback: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="❌ Закрыть", callback_data="admin_close")]
         ]
     )
-
     await callback.message.edit_text("🔐 Админ-панель", reply_markup=keyboard)
     await callback.answer()
 
 
 @dp.message(StateFilter(BroadcastStates.waiting_for_message))
 async def broadcast_get_message(message: Message, state: FSMContext):
-
     if message.from_user.id not in config.ADMIN_IDS:
         return
-
     await state.update_data(broadcast_text=message.html_text)
-
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✅ Отправить", callback_data="broadcast_confirm")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")]
         ]
     )
-
     await message.answer(
         "Проверьте текст. Он будет отправлен всем пользователям.",
         reply_markup=keyboard
     )
-
     await state.set_state(BroadcastStates.confirm)
 
 
 @dp.callback_query(StateFilter(BroadcastStates.confirm), F.data == "broadcast_confirm")
 async def broadcast_confirm(callback: CallbackQuery, state: FSMContext):
-
     data = await state.get_data()
     text = data.get("broadcast_text")
-
     if not text:
         await callback.message.edit_text("Ошибка: текст не найден")
         await state.clear()
         return
-
     users = get_all_users()
-
-    await callback.message.edit_text(
-        f"Начинаю рассылку {len(users)} пользователям..."
-    )
-
+    await callback.message.edit_text(f"Начинаю рассылку {len(users)} пользователям...")
     success = 0
     fail = 0
-
     for user_id in users:
-
         try:
             await bot.send_message(user_id, text, parse_mode=ParseMode.HTML)
             success += 1
             await asyncio.sleep(0.05)
-
         except Exception as e:
             fail += 1
             logging.error(f"Ошибка отправки {user_id}: {e}")
-
-    await callback.message.edit_text(
-        f"✅ Рассылка завершена.\nУспешно: {success}\nОшибок: {fail}"
-    )
-
+    await callback.message.edit_text(f"✅ Рассылка завершена.\nУспешно: {success}\nОшибок: {fail}")
     await state.clear()
 
 
 @dp.callback_query(StateFilter(BroadcastStates.confirm), F.data == "broadcast_cancel")
 async def broadcast_cancel(callback: CallbackQuery, state: FSMContext):
-
     await state.clear()
-
-    await callback.message.edit_text(
-        "Рассылка отменена",
-        reply_markup=back_to_admin_keyboard()
-    )
-
+    await callback.message.edit_text("Рассылка отменена", reply_markup=back_to_admin_keyboard())
     await callback.answer()
 
 
