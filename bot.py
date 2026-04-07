@@ -81,7 +81,7 @@ async def feedback_menu(callback: CallbackQuery):
 async def start_feedback(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "✍️ Напишите ваш отзыв. Он будет отправлен анонимно.\n\n"
-        "Чтобы отменить, отправьте /cancel"
+        "Чтобы отменить, отправьте /cancel.Также можете указать свой username."
     )
     await state.set_state(FeedbackStates.waiting_for_text)
     await callback.answer()
