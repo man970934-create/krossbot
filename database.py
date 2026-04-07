@@ -14,10 +14,15 @@ def init_db():
                   user_id INTEGER,
                   session_id TEXT UNIQUE,
                   start_time TIMESTAMP,
+                  last_heartbeat TIMESTAMP,
                   end_time TIMESTAMP,
                   duration INTEGER DEFAULT 0)''')
     c.execute('''CREATE TABLE IF NOT EXISTS bot_state
                  (key TEXT PRIMARY KEY, value TEXT)''')
+    # Индексы для ускорения статистики
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON reading_sessions(user_id)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_last_heartbeat ON reading_sessions(last_heartbeat)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_sessions_duration ON reading_sessions(duration)')
     conn.commit()
     c.execute("INSERT OR IGNORE INTO bot_state (key, value) VALUES ('bot_active', '1')")
     conn.commit()
@@ -35,23 +40,26 @@ def add_user(user_id, first_name, username):
 def start_reading_session(user_id, session_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''INSERT INTO reading_sessions (user_id, session_id, start_time)
-                 VALUES (?, ?, CURRENT_TIMESTAMP)''', (user_id, session_id))
+    # INSERT OR IGNORE предотвращает ошибку при дубликате session_id
+    c.execute('''INSERT OR IGNORE INTO reading_sessions (user_id, session_id, start_time, last_heartbeat)
+                 VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)''', (user_id, session_id))
     conn.commit()
     conn.close()
 
 def update_reading_session(session_id, duration):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''UPDATE reading_sessions SET duration = ? WHERE session_id = ?''',
-              (duration, session_id))
+    c.execute('''UPDATE reading_sessions 
+                 SET duration = ?, last_heartbeat = CURRENT_TIMESTAMP
+                 WHERE session_id = ?''', (duration, session_id))
     conn.commit()
     conn.close()
 
 def end_reading_session(session_id, duration):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute('''UPDATE reading_sessions SET end_time = CURRENT_TIMESTAMP, duration = ?
+    c.execute('''UPDATE reading_sessions 
+                 SET end_time = CURRENT_TIMESTAMP, duration = ?, last_heartbeat = CURRENT_TIMESTAMP
                  WHERE session_id = ?''', (duration, session_id))
     conn.commit()
     conn.close()
@@ -82,18 +90,21 @@ def get_all_users():
 def get_reading_stats():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    now = datetime.datetime.now()
+    # Используем UTC для корректности в любом часовом поясе
+    now = datetime.datetime.utcnow()
     day_ago = now - datetime.timedelta(days=1)
     week_ago = now - datetime.timedelta(weeks=1)
     month_ago = now - datetime.timedelta(days=30)
 
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM reading_sessions WHERE start_time > ?", (day_ago,))
+    # Активность считаем по last_heartbeat (последнее действие в сессии)
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM reading_sessions WHERE last_heartbeat > ?", (day_ago,))
     day_active = c.fetchone()[0] or 0
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM reading_sessions WHERE start_time > ?", (week_ago,))
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM reading_sessions WHERE last_heartbeat > ?", (week_ago,))
     week_active = c.fetchone()[0] or 0
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM reading_sessions WHERE start_time > ?", (month_ago,))
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM reading_sessions WHERE last_heartbeat > ?", (month_ago,))
     month_active = c.fetchone()[0] or 0
 
+    # Распределение по длительности чтения (в минутах)
     bins = [(5, '>5 мин'), (10, '>10 мин'), (30, '>30 мин'), (60, '>60 мин')]
     stats = {}
     for minutes, label in bins:
